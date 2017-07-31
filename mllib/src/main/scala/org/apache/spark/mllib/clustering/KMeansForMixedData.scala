@@ -1,0 +1,245 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.spark.mllib.clustering
+
+import scala.collection.mutable
+
+import org.apache.spark.annotation.Since
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.internal.Logging
+import org.apache.spark.ml.clustering.{KMeans => NewKMeans}
+import org.apache.spark.ml.util.Instrumentation
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
+import org.apache.spark.mllib.linalg.BLAS.{axpy, scal}
+import org.apache.spark.mllib.util.MLUtils
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.Row
+import org.apache.spark.storage.StorageLevel
+import org.apache.spark.util.Utils
+import org.apache.spark.util.random.XORShiftRandom
+
+
+
+/**
+ * dfawer
+ * sdfasdfsdf
+ */
+@Since("2.1.1")
+class KMeansForMixedData (
+    val coOccurrences: Array[mutable.ListMap[(Double, Double), Double]],
+    val significances: Array[Double],
+    private var k: Int,
+    private var maxIterations: Int,
+    private var initializationMode: String,
+    private var initializationSteps: Int,
+    private var epsilon: Double,
+    private var seed: Long) extends Serializable with Logging  {
+
+  /**
+   * Constructs a KMeans instance with default parameters: {k: 2, maxIterations: 20,
+   * initializationMode: "k-means||", initializationSteps: 2, epsilon: 1e-4, seed: random}.
+   */
+  @Since("0.8.0")
+  def this() = this(2, 20, KMeans.RANDOM, 2, 1e-4, Utils.random.nextLong())
+
+  /**
+   * Number of clusters to create (k).
+   *
+   * @note It is possible for fewer than k clusters to
+   * be returned, for example, if there are fewer than k distinct points to cluster.
+   */
+  @Since("1.4.0")
+  def getK: Int = k
+
+  /**
+   * Set the number of clusters to create (k).
+   *
+   * @note It is possible for fewer than k clusters to
+   * be returned, for example, if there are fewer than k distinct points to cluster. Default: 2.
+   */
+  @Since("0.8.0")
+  def setK(k: Int): this.type = {
+    require(k > 0,
+      s"Number of clusters must be positive but got ${k}")
+    this.k = k
+    this
+  }
+
+  /**
+   * Maximum number of iterations allowed.
+   */
+  @Since("1.4.0")
+  def getMaxIterations: Int = maxIterations
+
+  /**
+   * Set maximum number of iterations allowed. Default: 20.
+   */
+  @Since("0.8.0")
+  def setMaxIterations(maxIterations: Int): this.type = {
+    require(maxIterations >= 0,
+      s"Maximum of iterations must be nonnegative but got ${maxIterations}")
+    this.maxIterations = maxIterations
+    this
+  }
+
+  /**
+   * The initialization algorithm. This can be either "random" or "k-means||".
+   */
+  @Since("1.4.0")
+  def getInitializationMode: String = initializationMode
+
+  /**
+   * Set the initialization algorithm. This can be either "random" to choose random points as
+   * initial cluster centers, or "k-means||" to use a parallel variant of k-means++
+   * (Bahmani et al., Scalable K-Means++, VLDB 2012). Default: k-means||.
+   */
+  @Since("0.8.0")
+  def setInitializationMode(initializationMode: String): this.type = {
+    KMeans.validateInitMode(initializationMode)
+    this.initializationMode = initializationMode
+    this
+  }
+
+  /**
+   * Number of steps for the k-means|| initialization mode
+   */
+  @Since("1.4.0")
+  def getInitializationSteps: Int = initializationSteps
+
+  /**
+   * Set the number of steps for the k-means|| initialization mode. This is an advanced
+   * setting -- the default of 2 is almost always enough. Default: 2.
+   */
+  @Since("0.8.0")
+  def setInitializationSteps(initializationSteps: Int): this.type = {
+    require(initializationSteps > 0,
+      s"Number of initialization steps must be positive but got ${initializationSteps}")
+    this.initializationSteps = initializationSteps
+    this
+  }
+
+  /**
+   * The distance threshold within which we've consider centers to have converged.
+   */
+  @Since("1.4.0")
+  def getEpsilon: Double = epsilon
+
+  /**
+   * Set the distance threshold within which we've consider centers to have converged.
+   * If all centers move less than this Euclidean distance, we stop iterating one run.
+   */
+  @Since("0.8.0")
+  def setEpsilon(epsilon: Double): this.type = {
+    require(epsilon >= 0,
+      s"Distance threshold must be nonnegative but got ${epsilon}")
+    this.epsilon = epsilon
+    this
+  }
+
+  /**
+   * The random seed for cluster initialization.
+   */
+  @Since("1.4.0")
+  def getSeed: Long = seed
+
+  /**
+   * Set the random seed for cluster initialization.
+   */
+  @Since("1.4.0")
+  def setSeed(seed: Long): this.type = {
+    this.seed = seed
+    this
+  }
+
+  // Initial cluster centers can be provided as a KMeansModel object rather than using the
+  // random or k-means|| initializationMode
+  private var initialModel: Option[KMeansModel] = None
+
+  /**
+   * Set the initial starting point, bypassing the random initialization or k-means||
+   * The condition model.k == this.k must be met, failure results
+   * in an IllegalArgumentException.
+   */
+  @Since("1.4.0")
+  def setInitialModel(model: KMeansModel): this.type = {
+    require(model.k == k, "mismatched cluster count")
+    initialModel = Some(model)
+    this
+  }
+
+  private[spark] def run (
+      data: RDD[Vector],
+      instr: Option[Instrumentation[NewKMeans]]): Unit = {
+
+    if (data.getStorageLevel == StorageLevel.NONE) {
+      logWarning("The input data is not directly cached, which may hurt performance if its"
+        + " parent RDDs are also uncached.")
+    }
+
+    val sc = data.sparkContext
+
+    val initStartTime = System.nanoTime()
+    // initialization of k centers randomly
+
+    val centers: Array[Vector] = initialModel match {
+      case Some(kMeansCenters) =>
+        kMeansCenters.clusterCenters
+      case None =>
+        if (initializationMode == KMeans.RANDOM) {
+          initRandom(data)
+        } else {
+          throw new Exception(s"Mode $initializationMode is not supported yet.")
+        }
+    }
+
+    val initTimeInSeconds = (System.nanoTime() - initStartTime) / 1e9
+    logInfo(f"Initialization with $initializationMode took $initTimeInSeconds%.3f seconds.")
+
+    var converged = false
+    var cost = 0.0
+    var iteration = 0
+
+    val iterationStartTime = System.nanoTime()
+
+    // Execute iterations of Lloyd's algorithm until converged
+    while (iteration < maxIterations && !converged) {
+
+    }
+
+  }
+
+  /**
+   * Initialize a set of cluster centers at random.
+   */
+  private def initRandom(data: RDD[Vector]): Array[Vector] = {
+    // Select without replacement; may still produce duplicates if the data has < k distinct
+    // points, so deduplicate the centroids to match the behavior of k-means|| in the same situation
+    data.takeSample(false, k, new XORShiftRandom(this.seed).nextInt()).distinct
+  }
+}
+
+object KMeansForMixedData {
+  /**
+   * Returns the index of the closest center to the given point, as well as the squared distance.
+   */
+  private[mllib] def findClosest(
+      centers: TraversableOnce[Vector],
+      point: VectorWithNorm): (Int, Double) = {
+
+  }
+}
