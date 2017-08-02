@@ -183,6 +183,11 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
     instr.logParams(featuresCol, predictionCol, k, initMode, initSteps, maxIter, seed, tol)
 
     val (coOccurrences, significances) = coOccurrencesAndSignificances(dataset)
+    val featureIndexes = getFeatureIndexes(dataset, $(inputQualitativeCols))
+    //
+    var acc = 0
+    val indices = for (ele <- featureIndexes ) yield { acc = acc + ele.length; acc }
+
 
     new KMeansForMixedDataModel()
   }
@@ -193,6 +198,20 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
    * See `defaultCopy()`.
    */
   override def copy(extra: ParamMap): KMeansForMixedData = defaultCopy(extra)
+
+  /**
+   * :: DeveloperApi ::
+   *
+   * Check transform validity and derive the output schema from the input schema.
+   *
+   * We check validity for interactions between parameters during `transformSchema` and
+   * raise an exception if any parameter value is invalid. Parameter value checks which
+   * do not depend on other parameters are handled by `Param.validate()`.
+   *
+   * Typical implementation should first conduct verification on schema change and parameter
+   * validity, including complex parameter interaction checks.
+   */
+  override def transformSchema(schema: StructType): StructType = schema
 
   /**
    * For convenience, compute the co-occurrence and significances here.
@@ -291,16 +310,16 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
   def occurrenceOf(col: String): Array[(Double, Long)] = $(occurrences)(col)
 
   /**
-   * :: DeveloperApi ::
-   *
-   * Check transform validity and derive the output schema from the input schema.
-   *
-   * We check validity for interactions between parameters during `transformSchema` and
-   * raise an exception if any parameter value is invalid. Parameter value checks which
-   * do not depend on other parameters are handled by `Param.validate()`.
-   *
-   * Typical implementation should first conduct verification on schema change and parameter
-   * validity, including complex parameter interaction checks.
+   * Each array of double is the values originals, of which the index is the value of indexed.
+   * For example, array(a,b,c) means the index of a is 0, of b is 1, and of c is 2.
+   * @param data The input dataset
+   * @param features The array of names of features
+   * @return array of features of their values zipped with index
    */
-  override def transformSchema(schema: StructType): StructType = schema
+  def getFeatureIndexes(data: Dataset[_], features: Array[String]): Array[Array[(String, Int)]] = {
+    val schema = data.schema
+    features.map(f => {
+      schema(f).metadata.getMetadata("ml_attrs").getStringArray("vals").zipWithIndex
+    })
+  }
 }

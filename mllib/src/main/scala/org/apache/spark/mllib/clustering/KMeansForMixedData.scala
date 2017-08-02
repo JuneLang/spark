@@ -18,13 +18,12 @@
 package org.apache.spark.mllib.clustering
 
 import scala.collection.mutable
-
 import org.apache.spark.annotation.Since
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.ml.clustering.{KMeans => NewKMeans}
 import org.apache.spark.ml.util.Instrumentation
-import org.apache.spark.mllib.linalg.{Vector, Vectors}
+import org.apache.spark.mllib.linalg.{SparseVector, Vector, Vectors}
 import org.apache.spark.mllib.linalg.BLAS.{axpy, scal}
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
@@ -42,7 +41,7 @@ import org.apache.spark.util.random.XORShiftRandom
 @Since("2.1.1")
 class KMeansForMixedData (
     val coOccurrences: Array[mutable.ListMap[(Double, Double), Double]],
-    val significances: Array[Double],
+    val indices: Array[Int],
     private var k: Int,
     private var maxIterations: Int,
     private var initializationMode: String,
@@ -168,7 +167,7 @@ class KMeansForMixedData (
 
   // Initial cluster centers can be provided as a KMeansModel object rather than using the
   // random or k-means|| initializationMode
-  private var initialModel: Option[KMeansModel] = None
+  private var initialModel: Option[KMeansForMixedDataModel] = None
 
   /**
    * Set the initial starting point, bypassing the random initialization or k-means||
@@ -176,14 +175,19 @@ class KMeansForMixedData (
    * in an IllegalArgumentException.
    */
   @Since("1.4.0")
-  def setInitialModel(model: KMeansModel): this.type = {
+  def setInitialModel(model: KMeansForMixedDataModel): this.type = {
     require(model.k == k, "mismatched cluster count")
     initialModel = Some(model)
     this
   }
 
+  /**
+   * TODO Unit-> KMeansForMixedDataModel
+   * @param data
+   * @param instr
+   */
   private[spark] def run (
-      data: RDD[Vector],
+      data: RDD[VectorWithVector],
       instr: Option[Instrumentation[NewKMeans]]): Unit = {
 
     if (data.getStorageLevel == StorageLevel.NONE) {
@@ -196,7 +200,7 @@ class KMeansForMixedData (
     val initStartTime = System.nanoTime()
     // initialization of k centers randomly
 
-    val centers: Array[Vector] = initialModel match {
+    val centers: Array[VectorWithVector] = initialModel match {
       case Some(kMeansCenters) =>
         kMeansCenters.clusterCenters
       case None =>
@@ -218,7 +222,30 @@ class KMeansForMixedData (
 
     // Execute iterations of Lloyd's algorithm until converged
     while (iteration < maxIterations && !converged) {
+      val costAccum = sc.doubleAccumulator
+      val bcCenters = sc.broadcast(centers)
 
+      // Find the new centers
+      val newCenters = data.zipWithIndex().mapPartitions { points =>
+        val thisCenters = bcCenters.value
+        val dims = thisCenters.head.size
+
+        val sums = Array.fill(thisCenters.length)(Vectors.zeros(dims))
+        val counts = Array.fill(thisCenters.length)(0L)
+
+        points.foreach { case(point, index) =>
+          val (bestCenter, cost) = findClosest(thisCenters, point)
+          costAccum.add(cost)
+          val sum = sums(bestCenter)
+          axpy(1.0, point.vector, sum)
+          counts(bestCenter) += 1
+        }
+
+
+
+        // TODO
+        counts.iterator
+      }
     }
 
   }
@@ -226,20 +253,98 @@ class KMeansForMixedData (
   /**
    * Initialize a set of cluster centers at random.
    */
-  private def initRandom(data: RDD[Vector]): Array[Vector] = {
+  private def initRandom(data: RDD[VectorWithVector]): Array[VectorWithVector] = {
     // Select without replacement; may still produce duplicates if the data has < k distinct
     // points, so deduplicate the centroids to match the behavior of k-means|| in the same situation
     data.takeSample(false, k, new XORShiftRandom(this.seed).nextInt()).distinct
   }
-}
 
-object KMeansForMixedData {
   /**
    * Returns the index of the closest center to the given point, as well as the squared distance.
    */
   private[mllib] def findClosest(
-      centers: TraversableOnce[Vector],
-      point: VectorWithNorm): (Int, Double) = {
-
+      centers: TraversableOnce[VectorWithVector],
+      point: VectorWithVector): (Int, Double) = {
+    var bestDistance = Double.PositiveInfinity
+    var bestIndex = 0
+    var i = 0
+    centers.foreach { center =>
+      val (lowerBoundOfSqDist, sqQualiDist) = fastCompareDistance(center, point)
+      if (lowerBoundOfSqDist < bestDistance) {
+        val distance = fastSquaredDistance(center, point, sqQualiDist)
+        if (distance < bestDistance) {
+          bestDistance = distance
+          bestIndex = i
+        }
+      }
+      i += 1
+    }
+    (bestIndex, bestDistance)
   }
+
+  private def fastSquaredDistance(
+      v1: VectorWithVector,
+      v2: VectorWithVector,
+      sqQualiDist: Double): Double = {
+    val sqQuantiDist = MLUtils.fastSquaredDistance(v1.quantiVector, v1.norm,
+      v2.quantiVector, v2.norm)
+    sqQualiDist + sqQuantiDist
+  }
+
+  private[clustering] def fastCompareDistance(
+      v1: VectorWithVector,
+      v2: VectorWithVector): (Double, Double) = {
+    val quald = sqQualiDistance(v1.qualiVector, v2.qualiVector)
+    var norm = v1.norm - v2.norm
+    norm = norm * norm
+    (quald + norm, quald)
+  }
+
+  private def sqQualiDistance(v1: Vector, v2: Vector): Double = {
+    // how to get co-occurrence?
+    // need to put these functions in class, not object
+    var sum = 0.0
+    val size = v1.size
+    val jua = java.util.Arrays
+    for (i <- 0 until size) {
+      val index = jua.binarySearch(indices, i)
+      // TODO: compute distance
+      val dist = coOccurrences(index)(v1(i), v2(i))
+      sum = sum + dist * dist
+    }
+    sum
+  }
+
+//  private def fin idFeatureIndex(indices: Array[Int], i: Int, it: Int = 0): Int = {
+//    val index =
+//    if (indices(it) < i) it
+//    else findFeatureIndex(indices, i, it + 1)
+//  }
+}
+
+object KMeansForMixedData {
+
+}
+
+/**
+ * A vector with a vector of qualitative features, a vector of quantitative feature;
+ * the norm of quantitative vector, and the indices of qualitative features.
+ * The qualiVector is composed by the vectors generated by One-hot-encoder of each feature.
+ *
+ * @see [[org.apache.spark.mllib.clustering.KMeans#fastSquaredDistance]]
+ */
+private[clustering]
+class VectorWithVector(
+    val qualiVector: Vector,
+    val quantiVector: Vector,
+    val norm: Double) extends Serializable {
+
+  def size: Int = qualiVector.size + quantiVector.size
+
+  def this(vector: Vector) = this(vector, Vectors.norm(vector, 2.0))
+
+  def this(array: Array[Double]) = this(Vectors.dense(array))
+
+  /** Converts the vector to a dense vector. */
+  def toDense: VectorWithNorm = new VectorWithNorm(Vectors.dense(vector.toArray), norm)
 }
