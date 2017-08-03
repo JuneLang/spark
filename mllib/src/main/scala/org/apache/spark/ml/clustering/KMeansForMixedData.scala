@@ -22,7 +22,7 @@ import scala.collection.mutable
 import org.apache.spark.SparkException
 import org.apache.spark.annotation.{Experimental, Since}
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.linalg.{Vector, VectorUDT}
+import org.apache.spark.ml.linalg.{Vector, VectorUDT, SparseMatrix}
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.param.shared._
 import org.apache.spark.ml.util._
@@ -183,6 +183,7 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
     instr.logParams(featuresCol, predictionCol, k, initMode, initSteps, maxIter, seed, tol)
 
     val (coOccurrences, significances) = coOccurrencesAndSignificances(dataset)
+
     val featureIndexes = getFeatureIndexes(dataset, $(inputQualitativeCols))
     //
     var acc = 0
@@ -218,10 +219,11 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
    */
   def coOccurrencesAndSignificances(
       dataset: Dataset[_]
-      ): (Array[mutable.ListMap[(Double, Double), Double]], Array[Double]) = {
+      ): (Array[SparseMatrix], Array[Double]) = {
     val columns = $(inputQualitativeCols) ++ $(inputQuantitativeCols)
     val m = columns.length
     val qualiColumns = $(inputQualitativeCols)
+    val quantiColumns = $(inputQuantitativeCols)
 
     // Step1: for each qualitative feature and discretized quantitative feautre,
     // calculate co-occurrence of each value-pair.
@@ -229,7 +231,11 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
 
     // 2 dimension array. The first dimension is the columns.
     // the second is a listMap of (x, y) -> d(x, y) for every x != y of this column.
-    val coOccurrence = Array.fill(columns.length)(mutable.ListMap.empty[(Double, Double), Double])
+//    val coOccurrence = Array.fill(columns.length)(mutable.ListMap.empty[(Double, Double), Double])
+
+    // use matrix to save storage and fast access to values
+    val coOccurrence: Array[SparseMatrix] = Array.fill(qualiColumns.length)(SparseMatrix.speye(1))
+    val sigs = Array.fill(quantiColumns.length)(0.0)
 
     for (i <- columns.indices) {
       val coli = columns(i)
@@ -244,7 +250,9 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
         // .groupBy(coli).count().collect().map(row => row.getDouble(0) -> row.getLong(1))
       }
 
-      val coo_i = coOccurrence(i) // mutable.ListMap.empty[(String, String), Double]
+      // mutable.Buffer.empty[(Int, Int, Double)], it is a coordinate list
+      val coo_i = mutable.Buffer.empty[(Int, Int, Double)]
+      // TODO: use other collection rather than ListMap to improve performance
       var conditionalProbas = mutable.ListMap.empty[Double, Array[(Double, Double)]]
 
       // a map likes (vi -> (vj, p_ij))
@@ -287,22 +295,30 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
             }
             // add d_j(x,y) to the array of d(x,y),
             // and directly divided by m-1 to avoid another loop.
-            coo_i += ((vx._1, vy._1) -> d_jxy / (m - 1))
+            // coo_i += ((vx._1, vy._1) -> d_jxy / (m - 1))
+            coo_i.append((vx._1.toInt, vy._1.toInt, d_jxy / (m - 1)))
             //            coo_i((vx._1, vy._1)) += d_jxy / (m - 1)
           }
         }
       }
+      if(i < qualiColumns.length) {
+        coOccurrence(i) = SparseMatrix.fromCOO(values.length, values.length, coo_i.toArray)
+      }
+      else {
+        // for each numeric column, compute the significance
+        // using the co-occurrence of numeric features.
+        sigs(i) = (coo_i.reduce((x, y) => x._3 + y._3)
+          / ($(Interval) * ($(Interval) - 1) / 2))
+      }
+
     }
 
     val ss = dataset.sparkSession
     // the co-occurrence of numeric features is not needed
     val coOccurrenceMatrix = ss.sparkContext.broadcast(
       coOccurrence.dropRight($(inputQuantitativeCols).length))
-    // Step 2: for each numeric column, compute the significance
-    // using the co-occurrence of numeric features.
-    val sigs = coOccurrence.drop(qualiColumns.length).map(colListMap => {
-      colListMap.values.sum / ($(Interval) * ($(Interval) - 1) / 2)
-    })
+
+
     val significances = ss.sparkContext.broadcast(sigs)
     (coOccurrenceMatrix.value, significances.value)
   }

@@ -18,12 +18,13 @@
 package org.apache.spark.mllib.clustering
 
 import scala.collection.mutable
+
 import org.apache.spark.annotation.Since
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.ml.clustering.{KMeans => NewKMeans}
 import org.apache.spark.ml.util.Instrumentation
-import org.apache.spark.mllib.linalg.{SparseVector, Vector, Vectors}
+import org.apache.spark.mllib.linalg.{SparseMatrix, SparseVector, Vector, Vectors}
 import org.apache.spark.mllib.linalg.BLAS.{axpy, scal}
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
@@ -40,7 +41,7 @@ import org.apache.spark.util.random.XORShiftRandom
  */
 @Since("2.1.1")
 class KMeansForMixedData (
-    val coOccurrences: Array[mutable.ListMap[(Double, Double), Double]],
+    val coOccurrences: Array[SparseMatrix],
     val indices: Array[Int],
     private var k: Int,
     private var maxIterations: Int,
@@ -232,6 +233,7 @@ class KMeansForMixedData (
 
         val sums = Array.fill(thisCenters.length)(Vectors.zeros(dims))
         val counts = Array.fill(thisCenters.length)(0L)
+        val members = Array.fill(thisCenters.length)(Array.empty[Long])
 
         points.foreach { case(point, index) =>
           val (bestCenter, cost) = findClosest(thisCenters, point)
@@ -241,10 +243,10 @@ class KMeansForMixedData (
           counts(bestCenter) += 1
         }
 
-
-
-        // TODO
-        counts.iterator
+        counts.indices.filter(counts(_) > 0).map(j => (j, (sums(j), counts(j)))).iterator
+      }.reduceByKey { case ((sum1, count1), (sum2, count2)) =>
+        axpy(1.0, sum2, sum1)
+        (sum1, count1 + count2)
       }
     }
 
@@ -304,22 +306,80 @@ class KMeansForMixedData (
     // how to get co-occurrence?
     // need to put these functions in class, not object
     var sum = 0.0
-    val size = v1.size
-    val jua = java.util.Arrays
-    for (i <- 0 until size) {
-      val index = jua.binarySearch(indices, i)
-      // TODO: compute distance
-      val dist = coOccurrences(index)(v1(i), v2(i))
-      sum = sum + dist * dist
+    var ind = 0
+//    val size = v1.size
+
+//    var vv1 = 0
+//    var vv2 = 0
+//    var dist = 0.0
+//    for (i <- 0 until size) {
+//      // TODO: compute distance
+//      if (v1(i) == 1.0) {
+//        vv1 = i
+//      }
+//      if (v2(i) == 1.0) {
+//        vv2 = i
+//      }
+//      // if we get the index of values for both 2 vectors
+//      if (vv1 * vv2 != 0) {
+//        // when indexes are different
+//        if (vv1 != vv2) {
+//          val (vv1_index, vv2_index) = findValuesIndex(indices, vv1, vv2, ind)
+//          dist = if (vv1_index < vv2_index) {
+//            coOccurrences(ind)(vv1_index, vv2_index)
+//          }
+//          else {
+//            coOccurrences(ind)(vv2_index, vv1_index)
+//          }
+//        }
+//        else { // when indexed are same, means values are same
+//          dist = 0
+//        }
+//
+//        ind += 1
+//        vv1 = 0
+//        vv2 = 0
+//      }
+////      val dist = coOccurrences(index)(v1(i), v2(i))
+//      sum += dist * dist
+//    }
+
+    while(ind < indices.length) {
+      // the indexed values are (begin, end]
+      val endOfFeature = indices(ind)
+      val beginOfFeature = if (ind == 0) -1 else indices(ind - 1)
+      // the matrix for current feature
+      val matrix = coOccurrences(ind)
+      var dist = 0.0
+      // loop for v1
+      for (i <- (beginOfFeature + 1) until endOfFeature) {
+        // loop for v2
+        for (j <- (i + 1) to endOfFeature) {
+          val coeff1 = v1(i) * v2(j)
+          val coeff2 = v1(j) * v2(i)
+          dist += Math.abs(coeff1 - coeff2) * matrix(i, j)
+        }
+      }
+      sum += dist * dist
+      ind += 1
     }
     sum
   }
 
-//  private def fin idFeatureIndex(indices: Array[Int], i: Int, it: Int = 0): Int = {
-//    val index =
-//    if (indices(it) < i) it
-//    else findFeatureIndex(indices, i, it + 1)
-//  }
+  private def findValuesIndex(indices: Array[Int], v1: Int, v2: Int, ind: Int): (Int, Int) = {
+    val endOfFeature = indices(ind)
+    val beginOfFeature = if (ind == 0) -1 else indices(ind - 1)
+    require(v1 <= endOfFeature && v2 <= endOfFeature, "value index " +
+      "greater than feature's max index")
+    val vv1 = v1 - beginOfFeature
+    val vv2 = v2 - beginOfFeature
+    if (vv1 < 0 || vv2 < 0) {
+      throw new Exception("value index smaller than feature's min index")
+    }
+    else {
+      (vv1, vv2)
+    }
+  }
 }
 
 object KMeansForMixedData {
@@ -338,6 +398,7 @@ class VectorWithVector(
     val qualiVector: Vector,
     val quantiVector: Vector,
     val norm: Double) extends Serializable {
+  val vector: Vector = Vectors.dense(qualiVector.toArray ++ quantiVector.toArray).compressed
 
   def size: Int = qualiVector.size + quantiVector.size
 
