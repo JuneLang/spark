@@ -40,6 +40,7 @@ import org.apache.spark.util.random.XORShiftRandom
 @Since("2.1.1")
 class KMeansForMixedData (
     val coOccurrences: Array[SparseMatrix],
+    val significances: Array[Double],
     val indices: Array[Int],
     private var k: Int,
     private var maxIterations: Int,
@@ -53,8 +54,8 @@ class KMeansForMixedData (
    * initializationMode: "k-means||", initializationSteps: 2, epsilon: 1e-4, seed: random}.
    */
   @Since("0.8.0")
-  def this(coOccurrences: Array[SparseMatrix],
-    indices: Array[Int]) = this(coOccurrences, indices,
+  def this(coOccurrences: Array[SparseMatrix], significances: Array[Double],
+    indices: Array[Int]) = this(coOccurrences, significances, indices,
     2, 20, KMeans.RANDOM, 2, 1e-4, Utils.random.nextLong())
 
   /**
@@ -187,7 +188,7 @@ class KMeansForMixedData (
    * @param data
    * @param instr
    */
-  private[spark] def run (
+  def run (
       data: RDD[VectorWithVector],
       instr: Option[Instrumentation[NewKMeans]]): Unit = {
 
@@ -299,7 +300,7 @@ class KMeansForMixedData (
     sqQualiDist + sqQuantiDist
   }
 
-  private[clustering] def fastCompareDistance(
+ def fastCompareDistance(
       v1: VectorWithVector,
       v2: VectorWithVector): (Double, Double) = {
     val quald = sqQualiDistance(v1.qualiVector, v2.qualiVector)
@@ -308,7 +309,7 @@ class KMeansForMixedData (
     (quald + norm, quald)
   }
 
-  private def sqQualiDistance(v1: Vector, v2: Vector): Double = {
+  def sqQualiDistance(v1: Vector, v2: Vector): Double = {
     // how to get co-occurrence?
     // need to put these functions in class, not object
     var sum = 0.0
@@ -370,21 +371,6 @@ class KMeansForMixedData (
       ind += 1
     }
     sum
-  }
-
-  private def findValuesIndex(indices: Array[Int], v1: Int, v2: Int, ind: Int): (Int, Int) = {
-    val endOfFeature = indices(ind)
-    val beginOfFeature = if (ind == 0) -1 else indices(ind - 1)
-    require(v1 <= endOfFeature && v2 <= endOfFeature, "value index " +
-      "greater than feature's max index")
-    val vv1 = v1 - beginOfFeature
-    val vv2 = v2 - beginOfFeature
-    if (vv1 < 0 || vv2 < 0) {
-      throw new Exception("value index smaller than feature's min index")
-    }
-    else {
-      (vv1, vv2)
-    }
   }
 }
 

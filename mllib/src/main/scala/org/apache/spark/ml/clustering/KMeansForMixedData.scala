@@ -82,6 +82,13 @@ private[clustering] trait KMeansForMixedDataParams
   final val inputQuantitativeCols = new Param[Array[String]](this, "quantitative column names",
     "quantitative column names")
 
+  /** @group setParam */
+  def setInputQualitativeCols(values: Array[String]): this.type = set(inputQualitativeCols, values)
+
+  /** @group setParam */
+  def setInputQuantitativeCols(values: Array[String]): this.type =
+    set(inputQuantitativeCols, values)
+
   /**
    * Param for the initialization algorithm. Now only have random initialization.
    * @group expertParam
