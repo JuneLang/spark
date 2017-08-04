@@ -17,8 +17,6 @@
 
 package org.apache.spark.mllib.clustering
 
-import scala.collection.mutable
-
 import org.apache.spark.annotation.Since
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
@@ -55,7 +53,9 @@ class KMeansForMixedData (
    * initializationMode: "k-means||", initializationSteps: 2, epsilon: 1e-4, seed: random}.
    */
   @Since("0.8.0")
-  def this() = this(2, 20, KMeans.RANDOM, 2, 1e-4, Utils.random.nextLong())
+  def this(coOccurrences: Array[SparseMatrix],
+    indices: Array[Int]) = this(coOccurrences, indices,
+    2, 20, KMeans.RANDOM, 2, 1e-4, Utils.random.nextLong())
 
   /**
    * Number of clusters to create (k).
@@ -247,6 +247,12 @@ class KMeansForMixedData (
       }.reduceByKey { case ((sum1, count1), (sum2, count2)) =>
         axpy(1.0, sum2, sum1)
         (sum1, count1 + count2)
+      }.mapValues { case (sum, count) =>
+        scal(1.0 / count, sum)
+        val cut = indices.last + 1
+        val qualis = sum.slice(0, cut)
+        val quantis = sum.slice(cut, sum.size)
+        new VectorWithVector(qualis, quantis)
       }
     }
 
@@ -340,7 +346,7 @@ class KMeansForMixedData (
 //        vv1 = 0
 //        vv2 = 0
 //      }
-////      val dist = coOccurrences(index)(v1(i), v2(i))
+//      val dist = coOccurrences(index)(v1(i), v2(i))
 //      sum += dist * dist
 //    }
 
@@ -402,9 +408,10 @@ class VectorWithVector(
 
   def size: Int = qualiVector.size + quantiVector.size
 
-  def this(vector: Vector) = this(vector, Vectors.norm(vector, 2.0))
+  def this(qualiVector: Vector, quantiVector: Vector) =
+    this(qualiVector, quantiVector, Vectors.norm(quantiVector, 2.0))
 
-  def this(array: Array[Double]) = this(Vectors.dense(array))
+//  def this(array: Array[Double]) = this(Vectors.dense(array))
 
   /** Converts the vector to a dense vector. */
   def toDense: VectorWithNorm = new VectorWithNorm(Vectors.dense(vector.toArray), norm)

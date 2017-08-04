@@ -179,6 +179,14 @@ sealed trait Vector extends Serializable {
   def argmax: Int
 
   /**
+   * slice the vector
+   * @param from
+   * @param until
+   * @return
+   */
+  def slice(from: Int, until: Int): Vector
+
+  /**
    * Converts the vector to a JSON string.
    */
   @Since("1.6.0")
@@ -704,6 +712,12 @@ class DenseVector @Since("1.0.0") (
     }
   }
 
+  @Since("2.1.11")
+  override def slice(from: Int, until: Int): DenseVector = {
+    val s = values.slice(from, until)
+    new DenseVector(s)
+  }
+
   @Since("1.6.0")
   override def toJson: String = {
     val jValue = ("type" -> 1) ~ ("values" -> values.toSeq)
@@ -888,6 +902,13 @@ class SparseVector @Since("1.0.0") (
 
       maxIdx
     }
+  }
+
+  override def slice(from: Int, until: Int): SparseVector = {
+//    slice(from.until(until).toArray)
+    val selectedIndices = this.indices.takeWhile(i => i >= from && i < until)
+    val selectedValues = selectedIndices.map(i => this.values(i))
+    new SparseVector(selectedIndices.length, selectedIndices, selectedValues)
   }
 
   /**

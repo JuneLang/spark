@@ -22,12 +22,12 @@ import scala.collection.mutable
 import org.apache.spark.SparkException
 import org.apache.spark.annotation.{Experimental, Since}
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.linalg.{Vector, VectorUDT, SparseMatrix}
+import org.apache.spark.ml.linalg.{SparseMatrix, Vector, VectorUDT}
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.param.shared._
 import org.apache.spark.ml.util._
 import org.apache.spark.mllib.clustering.{KMeans => MLlibKMeans, KMeansModel => MLlibKMeansModel}
-import org.apache.spark.mllib.linalg.{Vector => OldVector, Vectors => OldVectors}
+import org.apache.spark.mllib.linalg.{DenseMatrix, Vector => OldVector, Vectors => OldVectors}
 import org.apache.spark.mllib.linalg.VectorImplicits._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
@@ -223,6 +223,7 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
     val columns = $(inputQualitativeCols) ++ $(inputQuantitativeCols)
     val m = columns.length
     val qualiColumns = $(inputQualitativeCols)
+    val qualiLength = qualiColumns.length
     val quantiColumns = $(inputQuantitativeCols)
 
     // Step1: for each qualitative feature and discretized quantitative feautre,
@@ -234,12 +235,12 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
 //    val coOccurrence = Array.fill(columns.length)(mutable.ListMap.empty[(Double, Double), Double])
 
     // use matrix to save storage and fast access to values
-    val coOccurrence: Array[SparseMatrix] = Array.fill(qualiColumns.length)(SparseMatrix.speye(1))
+    val coOccurrence: Array[SparseMatrix] = Array.ofDim(qualiLength)
     val sigs = Array.fill(quantiColumns.length)(0.0)
 
     for (i <- columns.indices) {
       val coli = columns(i)
-      val values = if (qualiColumns.length > i) {
+      val values = if (qualiLength > i) {
         occurrenceOf(qualiColumns(i))
       } else {
         dataset.select(coli).rdd.map(row =>
@@ -251,7 +252,8 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
       }
 
       // mutable.Buffer.empty[(Int, Int, Double)], it is a coordinate list
-      val coo_i = mutable.Buffer.empty[(Int, Int, Double)]
+      val coo_i = Array.ofDim[(Int, Int, Double)](values.length * values.length)
+
       // TODO: use other collection rather than ListMap to improve performance
       var conditionalProbas = mutable.ListMap.empty[Double, Array[(Double, Double)]]
 
@@ -271,44 +273,51 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
             val vj = row.getDouble(1)
             val count = row.getLong(2)
             val p_ij = count.toDouble / values.find(_._1 == vi).get._2.toDouble
-            vi -> (vj, p_ij)
+            (vi, (vj, p_ij))
           })
         temp.collect().foreach(row =>
           conditionalProbas += (row._1 -> (conditionalProbas(row._1) :+ row._2)))
 
         // now, we cal calculate the d_ij(x,y) for every x and y in column i
-        for (x <- 0 to values.length - 2) {
+        var matrixIndex = 0
+        for (x <- 0 until values.length) {
           val vx = values(x)
-          for (y <- x + 1 until values.length) {
+          for (y <- 0 until values.length) {
             val vy = values(y)
-
-            // d_j(x, y)
-            val d_jx = conditionalProbas(vx._1)
-            val d_jy = conditionalProbas(vy._1)
-
-            if (d_jx.length != d_jy.length) {
-              throw new Exception("The length of array `conditionalProbas` should be same")
+            if (vx._1.toInt <= vy._1.toInt) {
+              coo_i(matrixIndex) = (vx._1.toInt, vy._1.toInt, 0.0)
             }
-            var d_jxy = 0.0
-            for (k <- d_jx.indices) {
-              d_jxy += Math.max(d_jx(k)._2, d_jy(k)._2)
+            else {
+              // d_j(x, y)
+              val d_jx = conditionalProbas(vx._1)
+              val d_jy = conditionalProbas(vy._1)
+
+              if (d_jx.length != d_jy.length) {
+                throw new Exception("The length of array `conditionalProbas` should be same")
+              }
+              var d_jxy = 0.0
+              for (k <- d_jx.indices) {
+                d_jxy += Math.max(d_jx(k)._2, d_jy(k)._2)
+              }
+              coo_i(matrixIndex) = (vx._1.toInt, vy._1.toInt, d_jxy / (m - 1))
             }
+            matrixIndex += 1
             // add d_j(x,y) to the array of d(x,y),
             // and directly divided by m-1 to avoid another loop.
             // coo_i += ((vx._1, vy._1) -> d_jxy / (m - 1))
-            coo_i.append((vx._1.toInt, vy._1.toInt, d_jxy / (m - 1)))
-            //            coo_i((vx._1, vy._1)) += d_jxy / (m - 1)
+            // coo_i.append((vx._1.toInt, vy._1.toInt, d_jxy / (m - 1)))
+//            coOccurrence(i).up
           }
         }
       }
-      if(i < qualiColumns.length) {
-        coOccurrence(i) = SparseMatrix.fromCOO(values.length, values.length, coo_i.toArray)
+      if(i < qualiLength) {
+        coOccurrence(i) = SparseMatrix.fromCOO(values.length, values.length, coo_i)
       }
       else {
         // for each numeric column, compute the significance
         // using the co-occurrence of numeric features.
-        sigs(i) = (coo_i.reduce((x, y) => x._3 + y._3)
-          / ($(Interval) * ($(Interval) - 1) / 2))
+        sigs(i) = coo_i.reduce((x, y) =>
+          (0, 0, x._3 + y._3))._3 / ($(Interval) * ($(Interval) - 1) / 2)
       }
 
     }
