@@ -358,75 +358,8 @@ import org.apache.spark.util.Utils
 
 class KMFMDSuite extends SparkFunSuite with MLlibTestSparkContext {
   // scalastyle:off
-  val indices = Array(2, 5, 9, 13, 17)
-  val coOccurrences = SparseMatrix.fromCOO(3, 3, Array((0, 0, 0), (0, 1, 0.33), (0, 2, 0.66),
-    (1, 0, 0), (1, 1, 0), (1, 2, 0.33),
-    (2, 0, 0), (2, 1, 0), (2, 2, 0)))
   test("findvaluesindex") {
-//    coOccurrences.toArray foreach println
+
   }
 
-  private def sqQualiDistance(v1: Vector, v2: Vector): Double = {
-    // how to get co-occurrence?
-    // need to put these functions in class, not object
-    var sum = 0.0
-    var ind = 0
-    //    val size = v1.size
-
-    //    var vv1 = 0
-    //    var vv2 = 0
-    //    var dist = 0.0
-    //    for (i <- 0 until size) {
-    //      // TODO: compute distance
-    //      if (v1(i) == 1.0) {
-    //        vv1 = i
-    //      }
-    //      if (v2(i) == 1.0) {
-    //        vv2 = i
-    //      }
-    //      // if we get the index of values for both 2 vectors
-    //      if (vv1 * vv2 != 0) {
-    //        // when indexes are different
-    //        if (vv1 != vv2) {
-    //          val (vv1_index, vv2_index) = findValuesIndex(indices, vv1, vv2, ind)
-    //          dist = if (vv1_index < vv2_index) {
-    //            coOccurrences(ind)(vv1_index, vv2_index)
-    //          }
-    //          else {
-    //            coOccurrences(ind)(vv2_index, vv1_index)
-    //          }
-    //        }
-    //        else { // when indexed are same, means values are same
-    //          dist = 0
-    //        }
-    //
-    //        ind += 1
-    //        vv1 = 0
-    //        vv2 = 0
-    //      }
-    //      val dist = coOccurrences(index)(v1(i), v2(i))
-    //      sum += dist * dist
-    //    }
-
-    while(ind < indices.length) {
-      // the indexed values are (begin, end]
-      val endOfFeature = indices(ind)
-      val beginOfFeature = if (ind == 0) -1 else indices(ind - 1)
-      // the matrix for current feature
-      val matrix = coOccurrences
-      var dist = 0.0
-      // loop for v1
-      for (i <- (beginOfFeature + 1) until endOfFeature) {
-        // loop for v2
-        for (j <- (i + 1) to endOfFeature) {
-          val coeff1 = v1(i) * v2(j)
-          val coeff2 = v1(j) * v2(i)
-          dist += Math.abs(coeff1 - coeff2) * matrix(i, j)
-        }
-      }
-      sum += dist * dist
-      ind += 1
-    }
-    sum
-  }
 }

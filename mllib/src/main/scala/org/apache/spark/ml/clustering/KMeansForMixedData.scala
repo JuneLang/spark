@@ -26,8 +26,9 @@ import org.apache.spark.ml.linalg.{SparseMatrix, Vector, VectorUDT}
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.param.shared._
 import org.apache.spark.ml.util._
-import org.apache.spark.mllib.clustering.{KMeans => MLlibKMeans, KMeansModel => MLlibKMeansModel}
-import org.apache.spark.mllib.linalg.{DenseMatrix, Vector => OldVector, Vectors => OldVectors}
+import org.apache.spark.mllib.clustering.{KMeansForMixedData => MLlibKMeans, KMeansForMixedDataModel => MLlibKMeansModel}
+import org.apache.spark.mllib.clustering.MatrixImplicits._
+import org.apache.spark.mllib.linalg.{Matrices, SparseMatrix => oldSparseMatrix, Vector => OldVector, Vectors => OldVectors}
 import org.apache.spark.mllib.linalg.VectorImplicits._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
@@ -61,11 +62,11 @@ private[clustering] trait KMeansForMixedDataParams
   def getK: Int = $(k)
 
   /** @group param */
-  final val Interval = new IntParam(this, "interval", "The number of intervals to " +
+  final val interval = new IntParam(this, "interval", "The number of intervals to " +
     "descretize numeric feature", ParamValidators.gt(1))
 
   /** @group getParam */
-  def getInterval: Int = $(Interval)
+  def getInterval: Int = $(interval)
 
   /** @group param */
   final val occurrences = new Param[Map[String, Array[(Double, Long)]]](this, "occurrence",
@@ -160,12 +161,20 @@ class KMeansForMixedDataModel extends Model[KMeansForMixedDataModel]
  * Created by junlang on 7/27/17.
  * KMeans for mixed data
  */
-class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
+class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMixedDataModel]
   with KMeansForMixedDataParams with DefaultParamsWritable {
   /**
    * An immutable unique ID for the object and its derivatives.
    */
-  override val uid: String = Identifiable.randomUID("kMeansForMixedData")
+//  override val uid: String = Identifiable.randomUID("kMeansForMixedData")
+  def this() = this(Identifiable.randomUID("kMeansForMixedData"))
+
+  setDefault(
+    k -> 2,
+    interval -> 10,
+    inputQuantitativeCols -> Array.empty[String],
+    inputQualitativeCols -> Array.empty[String]
+  )
 
   /** @group setParam */
   @Since("1.5.0")
@@ -195,6 +204,8 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
     //
     var acc = 0
     val indices = for (ele <- featureIndexes ) yield { acc = acc + ele.length; acc }
+
+    val algo = new MLlibKMeans(coOccurrences, significances, indices)
 
 
     new KMeansForMixedDataModel()
@@ -259,21 +270,13 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
       }
 
       // mutable.Buffer.empty[(Int, Int, Double)], it is a coordinate list
-      val coo_i = Array.ofDim[(Int, Int, Double)](values.length * values.length)
+      val coo_i = Array.ofDim[(Int, Int, Double)]((m - 1) * values.length * values.length)
 
-      // TODO: use other collection rather than ListMap to improve performance
-      var conditionalProbas = mutable.ListMap.empty[Double, Array[(Double, Double)]]
 
-      // a map likes (vi -> (vj, p_ij))
-      values.foreach(v => conditionalProbas += (v._1 -> Array.empty[(Double, Double)]))
+      var matrixIndex = 0
 
-      val rest = if (i == 0) {
-        columns.drop(i)
-      } else {
-        columns.take(i) ++ columns.drop(i + 1)
-      }
-      for(j <- rest.indices) {
-        val colj = rest(j)
+      for(j <- columns.indices; if j != i) {
+        val colj = columns(j)
         val temp = dataset.groupBy(coli, colj).count().rdd
           .map(row => {
             val vi = row.getDouble(0)
@@ -281,12 +284,25 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
             val count = row.getLong(2)
             val p_ij = count.toDouble / values.find(_._1 == vi).get._2.toDouble
             (vi, (vj, p_ij))
-          })
-        temp.collect().foreach(row =>
-          conditionalProbas += (row._1 -> (conditionalProbas(row._1) :+ row._2)))
+          }).collect()
 
+        // TODO: use other collection rather than ListMap to improve performance
+        var cp = mutable.ListMap.empty[Double, Array[(Double, Double)]]
+
+        // a map likes (vi -> (vj, p_ij))
+        values.foreach(v => cp += (v._1 -> Array.empty[(Double, Double)]))
+
+        temp.foreach(row =>
+          cp += (row._1 -> (cp(row._1) :+ row._2)))
+        val conditionalProbas = cp.mapValues(v => v.sortBy(_._1))
+
+        // scalastyle:off
+        //      conditionalProbas.toArray foreach(x => {
+        //        print("value:" + x._1 + ": ")
+        //        x._2 foreach print
+        //      })
+        //      println()
         // now, we cal calculate the d_ij(x,y) for every x and y in column i
-        var matrixIndex = 0
         for (x <- 0 until values.length) {
           val vx = values(x)
           for (y <- 0 until values.length) {
@@ -304,42 +320,50 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
               }
               var d_jxy = 0.0
               for (k <- d_jx.indices) {
+                val d_jxk = d_jx(k)
                 d_jxy += Math.max(d_jx(k)._2, d_jy(k)._2)
               }
-              coo_i(matrixIndex) = (vx._1.toInt, vy._1.toInt, d_jxy / (m - 1))
+              coo_i(matrixIndex) = (vx._1.toInt, vy._1.toInt, (d_jxy - 1) / (m - 1))
             }
             matrixIndex += 1
             // add d_j(x,y) to the array of d(x,y),
             // and directly divided by m-1 to avoid another loop.
             // coo_i += ((vx._1, vy._1) -> d_jxy / (m - 1))
             // coo_i.append((vx._1.toInt, vy._1.toInt, d_jxy / (m - 1)))
-//            coOccurrence(i).up
+            //            coOccurrence(i).up
           }
         }
       }
+
+
       if(i < qualiLength) {
         coOccurrence(i) = SparseMatrix.fromCOO(values.length, values.length, coo_i)
       }
       else {
         // for each numeric column, compute the significance
         // using the co-occurrence of numeric features.
-        sigs(i) = coo_i.reduce((x, y) =>
-          (0, 0, x._3 + y._3))._3 / ($(Interval) * ($(Interval) - 1) / 2)
+        sigs(i - qualiLength) = coo_i.reduce((x, y) =>
+          (0, 0, x._3 + y._3))._3 / ($(interval) * ($(interval) - 1) / 2)
       }
 
     }
 
     val ss = dataset.sparkSession
     // the co-occurrence of numeric features is not needed
-    val coOccurrenceMatrix = ss.sparkContext.broadcast(
-      coOccurrence.dropRight($(inputQuantitativeCols).length))
-
+    val coOccurrenceMatrix = ss.sparkContext.broadcast(coOccurrence)
 
     val significances = ss.sparkContext.broadcast(sigs)
     (coOccurrenceMatrix.value, significances.value)
   }
 
-  def occurrenceOf(col: String): Array[(Double, Long)] = $(occurrences)(col)
+  def occurrenceOf(col: String): Array[(Double, Long)] = {
+    // $(occurrences)(col)
+    col match {
+      case "data-achat-str_index" => Array(0.0 -> 8506, 1.0 -> 5439, 2.0 -> 1362)
+      case "data-likefacebook-str_index" => Array(0.0 -> 13465, 1.0 -> 1842)
+      case "data-cartefidelite-str_index" => Array(0.0 -> 12938, 1.0 -> 2369)
+    }
+  }
 
   /**
    * Each array of double is the values originals, of which the index is the value of indexed.
@@ -351,7 +375,7 @@ class KMeansForMixedData extends Estimator[KMeansForMixedDataModel]
   def getFeatureIndexes(data: Dataset[_], features: Array[String]): Array[Array[(String, Int)]] = {
     val schema = data.schema
     features.map(f => {
-      schema(f).metadata.getMetadata("ml_attrs").getStringArray("vals").zipWithIndex
+      schema(f).metadata.getMetadata("ml_attr").getStringArray("vals").zipWithIndex
     })
   }
 }

@@ -18,15 +18,13 @@
 package org.apache.spark.mllib.clustering
 
 import scala.collection.JavaConverters._
-
 import org.json4s._
 import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
-
 import org.apache.spark.SparkContext
 import org.apache.spark.annotation.Since
 import org.apache.spark.api.java.JavaRDD
-import org.apache.spark.mllib.linalg.Vector
+import org.apache.spark.mllib.linalg.{SparseMatrix, Vector}
 import org.apache.spark.mllib.pmml.PMMLExportable
 import org.apache.spark.mllib.util.{Loader, Saveable}
 import org.apache.spark.rdd.RDD
@@ -37,23 +35,27 @@ import org.apache.spark.sql.{Row, SparkSession}
  */
 @Since("0.8.0")
 class KMeansForMixedDataModel @Since("1.1.0")
-  (@Since("1.0.0") val clusterCenters: Array[VectorWithVector])
+  (@Since("1.0.0") val clusterCenters: Array[VectorWithVector],
+   val coOccurrences: Array[SparseMatrix],
+   val significances: Array[Double],
+   val indices: Array[Int])
   extends Saveable with Serializable with PMMLExportable {
 
-//  private val clusterCentersWithVector =
-//    if (clusterCenters == null) null else clusterCenters.map(new VectorWithVector(_))
-
-  /**
-   * A Java-friendly constructor that takes an Iterable of Vectors.
-   */
-  @Since("1.4.0")
-  def this(centers: java.lang.Iterable[VectorWithVector]) = this(centers.asScala.toArray)
+  private val clusterCentersWithVector =
+    if (clusterCenters == null) null else clusterCenters.map(new VectorWithVector(_))
+  
+  def this(coOccurrences: Array[SparseMatrix],
+    significances: Array[Double],
+    indices: Array[Int],
+    centers: java.lang.Iterable[VectorWithVector]) = {
+    this(coOccurrences, significances, indices, centers.asScala.toArray)
+  }
 
   /**
    * Total number of clusters.
    */
   @Since("0.8.0")
-  def k: Int = 2 // clusterCentersWithVector.length
+  def k: Int = clusterCentersWithVector.length
 
 //  /**
 //   * Returns the cluster index that a given point belongs to.

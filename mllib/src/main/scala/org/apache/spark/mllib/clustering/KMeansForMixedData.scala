@@ -17,12 +17,15 @@
 
 package org.apache.spark.mllib.clustering
 
+import scala.language.implicitConversions
+
 import org.apache.spark.annotation.Since
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
-import org.apache.spark.ml.clustering.{KMeans => NewKMeans}
+import org.apache.spark.ml.{linalg => newlinalg}
+import org.apache.spark.ml.clustering.{KMeansForMixedData => NewKMeans}
 import org.apache.spark.ml.util.Instrumentation
-import org.apache.spark.mllib.linalg.{SparseMatrix, SparseVector, Vector, Vectors}
+import org.apache.spark.mllib.linalg._
 import org.apache.spark.mllib.linalg.BLAS.{axpy, scal}
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
@@ -38,10 +41,10 @@ import org.apache.spark.util.random.XORShiftRandom
  * sdfasdfsdf
  */
 @Since("2.1.1")
-class KMeansForMixedData (
-    val coOccurrences: Array[SparseMatrix],
-    val significances: Array[Double],
-    val indices: Array[Int],
+class KMeansForMixedData private (
+    var coOccurrences: Array[SparseMatrix],
+    var significances: Array[Double],
+    var indices: Array[Int],
     private var k: Int,
     private var maxIterations: Int,
     private var initializationMode: String,
@@ -57,6 +60,24 @@ class KMeansForMixedData (
   def this(coOccurrences: Array[SparseMatrix], significances: Array[Double],
     indices: Array[Int]) = this(coOccurrences, significances, indices,
     2, 20, KMeans.RANDOM, 2, 1e-4, Utils.random.nextLong())
+
+  def getCoOccurrences: Array[SparseMatrix] = this.coOccurrences
+  def setCoOccurrences(coo: Array[SparseMatrix]): this.type = {
+    this.coOccurrences = coo
+    this
+  }
+
+  def getSignificances: Array[Double] = significances
+  def setSignificances(sigs: Array[Double]): this.type = {
+    significances = sigs
+    this
+  }
+
+  def getIndices: Array[Int] = indices
+  def setIndices(inds: Array[Int]): this.type = {
+    indices = inds
+    this
+  }
 
   /**
    * Number of clusters to create (k).
@@ -183,19 +204,30 @@ class KMeansForMixedData (
     this
   }
 
+  def run(data: RDD[Vector],
+      instr: Option[Instrumentation[NewKMeans]]): Unit = {
+    if (data.getStorageLevel == StorageLevel.NONE) {
+      logWarning("The input data is not directly cached, which may hurt performance if its"
+        + " parent RDDs are also uncached.")
+    }
+    val newData: RDD[VectorWithVector] = data.map(vec => {
+      val cut = indices.last + 1
+      val qualiVec = vec.slice(0, cut)
+      val quantiVec = vec.slice(cut, vec.size)
+      VectorWithVector.create(qualiVec, quantiVec, significances)
+    })
+    runAlgorithm(newData, instr)
+
+  }
+
   /**
    * TODO Unit-> KMeansForMixedDataModel
    * @param data
    * @param instr
    */
-  def run (
+  def runAlgorithm (
       data: RDD[VectorWithVector],
       instr: Option[Instrumentation[NewKMeans]]): Unit = {
-
-    if (data.getStorageLevel == StorageLevel.NONE) {
-      logWarning("The input data is not directly cached, which may hurt performance if its"
-        + " parent RDDs are also uncached.")
-    }
 
     val sc = data.sparkContext
 
@@ -254,8 +286,34 @@ class KMeansForMixedData (
         val qualis = sum.slice(0, cut)
         val quantis = sum.slice(cut, sum.size)
         new VectorWithVector(qualis, quantis)
+      }.collectAsMap()
+
+      bcCenters.destroy(blocking = false)
+
+      // update de cluster centers and costs
+      converged = true
+      newCenters.foreach {case (j, newCenter) =>
+        val sqQualidist = sqQualiDistance(newCenter.qualiVector, centers(j).qualiVector)
+        if(converged &&
+            fastSquaredDistance(newCenter, centers(j), sqQualidist) > epsilon * epsilon) {
+          converged = false
+        }
+          centers(j) = newCenter
       }
+
+      cost = costAccum.value
+      iteration += 1
     }
+
+    val iterationTimeInSeconds = (System.nanoTime() - iterationStartTime) / 1e9
+    logInfo(f"Iterations took $iterationTimeInSeconds%.3f seconds.")
+    if (iteration == maxIterations) {
+      logInfo(s"KMeans reached the max number of iterations: $maxIterations.")
+    } else {
+      logInfo(s"KMeans converged in $iteration iterations.")
+    }
+
+    logInfo(s"The cost is $cost.")
 
   }
 
@@ -295,6 +353,7 @@ class KMeansForMixedData (
       v1: VectorWithVector,
       v2: VectorWithVector,
       sqQualiDist: Double): Double = {
+
     val sqQuantiDist = MLUtils.fastSquaredDistance(v1.quantiVector, v1.norm,
       v2.quantiVector, v2.norm)
     sqQualiDist + sqQuantiDist
@@ -364,7 +423,8 @@ class KMeansForMixedData (
         for (j <- (i + 1) to endOfFeature) {
           val coeff1 = v1(i) * v2(j)
           val coeff2 = v1(j) * v2(i)
-          dist += Math.abs(coeff1 - coeff2) * matrix(i, j)
+          dist += Math.abs(coeff1 - coeff2) *
+            matrix(i - beginOfFeature - 1, j - beginOfFeature - 1)
         }
       }
       sum += dist * dist
@@ -375,6 +435,14 @@ class KMeansForMixedData (
 }
 
 object KMeansForMixedData {
+
+  private[spark] def validateInitMode(initMode: String): Boolean = {
+    initMode match {
+      case KMeans.RANDOM => true
+      case KMeans.K_MEANS_PARALLEL => true
+      case _ => false
+    }
+  }
 
 }
 
@@ -394,11 +462,39 @@ class VectorWithVector(
 
   def size: Int = qualiVector.size + quantiVector.size
 
-  def this(qualiVector: Vector, quantiVector: Vector) =
+  def this(qualiVector: Vector, quantiVector: Vector) = {
+
     this(qualiVector, quantiVector, Vectors.norm(quantiVector, 2.0))
+  }
+
+  def this(vector: VectorWithVector) = this(vector.qualiVector, vector.quantiVector)
 
 //  def this(array: Array[Double]) = this(Vectors.dense(array))
 
   /** Converts the vector to a dense vector. */
   def toDense: VectorWithNorm = new VectorWithNorm(Vectors.dense(vector.toArray), norm)
+}
+
+object VectorWithVector {
+  def create(qualiVector: Vector,
+             quantiVector: Vector, significance: Array[Double]): VectorWithVector = {
+    require(quantiVector.size == significance.length, "Not every quantitative feature" +
+      "has a significance")
+    val values = quantiVector.toArray.zip(significance).map{ case (x, a) => a * x }
+    new VectorWithVector(qualiVector, Vectors.dense(values).compressed)
+  }
+}
+
+private[spark] object MatrixImplicits{
+  implicit def mlMatrixArrayToMllibMatrixArray(m: Array[newlinalg.Matrix]): Array[Matrix] = {
+    m map Matrices.fromML
+  }
+
+  implicit def mllibMatrixArrayToMlMatrixArray(m: Array[Matrix]): Array[newlinalg.Matrix] = {
+    m map(_.asML)
+  }
+
+  implicit def mlSMAToMllibSMA(m: Array[newlinalg.SparseMatrix]): Array[SparseMatrix] = {
+    m.map(Matrices.fromML(_).asInstanceOf[SparseMatrix])
+  }
 }
