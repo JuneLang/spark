@@ -42,9 +42,9 @@ import org.apache.spark.util.random.XORShiftRandom
  */
 @Since("2.1.1")
 class KMeansForMixedData private (
-    var coOccurrences: Array[SparseMatrix],
-    var significances: Array[Double],
-    var indices: Array[Int],
+    val coOccurrences: Array[SparseMatrix],
+    val significances: Array[Double],
+    val indices: Array[Int],
     private var k: Int,
     private var maxIterations: Int,
     private var initializationMode: String,
@@ -62,23 +62,26 @@ class KMeansForMixedData private (
     2, 20, KMeans.RANDOM, 2, 1e-4, Utils.random.nextLong())
 
   def getCoOccurrences: Array[SparseMatrix] = this.coOccurrences
-  def setCoOccurrences(coo: Array[SparseMatrix]): this.type = {
-    this.coOccurrences = coo
-    this
-  }
+//  def setCoOccurrences(coo: Array[SparseMatrix]): this.type = {
+//    this.coOccurrences = coo
+//    this
+//  }
 
   def getSignificances: Array[Double] = significances
-  def setSignificances(sigs: Array[Double]): this.type = {
-    significances = sigs
-    this
-  }
+//  def setSignificances(sigs: Array[Double]): this.type = {
+//    significances = sigs
+//    this
+//  }
 
   def getIndices: Array[Int] = indices
-  def setIndices(inds: Array[Int]): this.type = {
-    indices = inds
-    this
-  }
+//  def setIndices(inds: Array[Int]): this.type = {
+//    indices = inds
+//    this
+//  }
 
+  private implicit val coo = coOccurrences
+  private implicit val sig = significances
+  private implicit val ind = indices
   /**
    * Number of clusters to create (k).
    *
@@ -204,8 +207,7 @@ class KMeansForMixedData private (
     this
   }
 
-  def run(data: RDD[Vector],
-      instr: Option[Instrumentation[NewKMeans]]): Unit = {
+  def run(data: RDD[Vector]): KMeansForMixedDataModel = {
     if (data.getStorageLevel == StorageLevel.NONE) {
       logWarning("The input data is not directly cached, which may hurt performance if its"
         + " parent RDDs are also uncached.")
@@ -214,20 +216,32 @@ class KMeansForMixedData private (
       val cut = indices.last + 1
       val qualiVec = vec.slice(0, cut)
       val quantiVec = vec.slice(cut, vec.size)
+      // scalastyle:off
+//      println(vec.toArray.mkString(","))
+//      println(quantiVec.toArray.mkString(","))
       VectorWithVector.create(qualiVec, quantiVec, significances)
     })
-    runAlgorithm(newData, instr)
+    newData.persist()
+    // scalastyle:off
+    data.take(3).foreach(vwv => println(vwv.toArray.mkString(",")))
+    val model = runAlgorithm(newData)
+    newData.unpersist()
 
+    // Warn at the end of the run as well, for increased visibility.
+    if (data.getStorageLevel == StorageLevel.NONE) {
+      logWarning("The input data was not directly cached, which may hurt performance if its"
+        + " parent RDDs are also uncached.")
+    }
+    model
   }
 
   /**
    * TODO Unit-> KMeansForMixedDataModel
-   * @param data
-   * @param instr
+   * @param data input rdd
+   * ,instr: Option[Instrumentation[NewKMeans
    */
   def runAlgorithm (
-      data: RDD[VectorWithVector],
-      instr: Option[Instrumentation[NewKMeans]]): Unit = {
+      data: RDD[VectorWithVector]): KMeansForMixedDataModel = {
 
     val sc = data.sparkContext
 
@@ -244,6 +258,9 @@ class KMeansForMixedData private (
           throw new Exception(s"Mode $initializationMode is not supported yet.")
         }
     }
+
+//    // scalastyle:off
+//    centers.foreach(vwv => println(vwv.vector.toArray.mkString(",")))
 
     val initTimeInSeconds = (System.nanoTime() - initStartTime) / 1e9
     logInfo(f"Initialization with $initializationMode took $initTimeInSeconds%.3f seconds.")
@@ -269,7 +286,7 @@ class KMeansForMixedData private (
         val members = Array.fill(thisCenters.length)(Array.empty[Long])
 
         points.foreach { case(point, index) =>
-          val (bestCenter, cost) = findClosest(thisCenters, point)
+          val (bestCenter, cost) = KMeansForMixedData.findClosest(thisCenters, point)
           costAccum.add(cost)
           val sum = sums(bestCenter)
           axpy(1.0, point.vector, sum)
@@ -293,9 +310,11 @@ class KMeansForMixedData private (
       // update de cluster centers and costs
       converged = true
       newCenters.foreach {case (j, newCenter) =>
-        val sqQualidist = sqQualiDistance(newCenter.qualiVector, centers(j).qualiVector)
+        val sqQualidist = KMeansForMixedData.sqQualiDistance(newCenter.qualiVector,
+                                                              centers(j).qualiVector)
         if(converged &&
-            fastSquaredDistance(newCenter, centers(j), sqQualidist) > epsilon * epsilon) {
+            KMeansForMixedData.fastSquaredDistance(newCenter, centers(j),
+                                                    sqQualidist) > epsilon * epsilon) {
           converged = false
         }
           centers(j) = newCenter
@@ -315,6 +334,7 @@ class KMeansForMixedData private (
 
     logInfo(s"The cost is $cost.")
 
+    new KMeansForMixedDataModel(centers, coOccurrences, significances, indices)
   }
 
   /**
@@ -325,13 +345,27 @@ class KMeansForMixedData private (
     // points, so deduplicate the centroids to match the behavior of k-means|| in the same situation
     data.takeSample(false, k, new XORShiftRandom(this.seed).nextInt()).distinct
   }
+}
+
+object KMeansForMixedData {
+
+  private[spark] def validateInitMode(initMode: String): Boolean = {
+    initMode match {
+      case KMeans.RANDOM => true
+      case KMeans.K_MEANS_PARALLEL => true
+      case _ => false
+    }
+  }
 
   /**
    * Returns the index of the closest center to the given point, as well as the squared distance.
    */
   private[mllib] def findClosest(
-      centers: TraversableOnce[VectorWithVector],
-      point: VectorWithVector): (Int, Double) = {
+                                  centers: TraversableOnce[VectorWithVector],
+                                  point: VectorWithVector)
+                                (implicit coOccurences: Array[SparseMatrix],
+                                 significances: Array[Double],
+                                 indices: Array[Int]): (Int, Double) = {
     var bestDistance = Double.PositiveInfinity
     var bestIndex = 0
     var i = 0
@@ -349,66 +383,71 @@ class KMeansForMixedData private (
     (bestIndex, bestDistance)
   }
 
-  private def fastSquaredDistance(
-      v1: VectorWithVector,
-      v2: VectorWithVector,
-      sqQualiDist: Double): Double = {
-
-    val sqQuantiDist = MLUtils.fastSquaredDistance(v1.quantiVector, v1.norm,
-      v2.quantiVector, v2.norm)
-    sqQualiDist + sqQuantiDist
-  }
-
- def fastCompareDistance(
-      v1: VectorWithVector,
-      v2: VectorWithVector): (Double, Double) = {
+  def fastCompareDistance(
+                           v1: VectorWithVector,
+                           v2: VectorWithVector)
+                         (implicit coOccurrences: Array[SparseMatrix],
+                          indices: Array[Int]): (Double, Double) = {
     val quald = sqQualiDistance(v1.qualiVector, v2.qualiVector)
     var norm = v1.norm - v2.norm
     norm = norm * norm
     (quald + norm, quald)
   }
 
-  def sqQualiDistance(v1: Vector, v2: Vector): Double = {
+  private def fastSquaredDistance(
+                                   v1: VectorWithVector,
+                                   v2: VectorWithVector,
+                                   sqQualiDist: Double)
+                                 (implicit significances: Array[Double]): Double = {
+
+    val sqQuantiDist = MLUtils.fastSquaredDistance(v1.quantiVector, v1.norm,
+                                                    v2.quantiVector, v2.norm)
+    sqQualiDist + sqQuantiDist
+  }
+
+  def sqQualiDistance(v1: Vector, v2: Vector)
+                     (implicit coOccurrences: Array[SparseMatrix],
+                      indices: Array[Int]): Double = {
     // how to get co-occurrence?
     // need to put these functions in class, not object
     var sum = 0.0
     var ind = 0
-//    val size = v1.size
+    //    val size = v1.size
 
-//    var vv1 = 0
-//    var vv2 = 0
-//    var dist = 0.0
-//    for (i <- 0 until size) {
-//      // TODO: compute distance
-//      if (v1(i) == 1.0) {
-//        vv1 = i
-//      }
-//      if (v2(i) == 1.0) {
-//        vv2 = i
-//      }
-//      // if we get the index of values for both 2 vectors
-//      if (vv1 * vv2 != 0) {
-//        // when indexes are different
-//        if (vv1 != vv2) {
-//          val (vv1_index, vv2_index) = findValuesIndex(indices, vv1, vv2, ind)
-//          dist = if (vv1_index < vv2_index) {
-//            coOccurrences(ind)(vv1_index, vv2_index)
-//          }
-//          else {
-//            coOccurrences(ind)(vv2_index, vv1_index)
-//          }
-//        }
-//        else { // when indexed are same, means values are same
-//          dist = 0
-//        }
-//
-//        ind += 1
-//        vv1 = 0
-//        vv2 = 0
-//      }
-//      val dist = coOccurrences(index)(v1(i), v2(i))
-//      sum += dist * dist
-//    }
+    //    var vv1 = 0
+    //    var vv2 = 0
+    //    var dist = 0.0
+    //    for (i <- 0 until size) {
+    //      // TODO: compute distance
+    //      if (v1(i) == 1.0) {
+    //        vv1 = i
+    //      }
+    //      if (v2(i) == 1.0) {
+    //        vv2 = i
+    //      }
+    //      // if we get the index of values for both 2 vectors
+    //      if (vv1 * vv2 != 0) {
+    //        // when indexes are different
+    //        if (vv1 != vv2) {
+    //          val (vv1_index, vv2_index) = findValuesIndex(indices, vv1, vv2, ind)
+    //          dist = if (vv1_index < vv2_index) {
+    //            coOccurrences(ind)(vv1_index, vv2_index)
+    //          }
+    //          else {
+    //            coOccurrences(ind)(vv2_index, vv1_index)
+    //          }
+    //        }
+    //        else { // when indexed are same, means values are same
+    //          dist = 0
+    //        }
+    //
+    //        ind += 1
+    //        vv1 = 0
+    //        vv2 = 0
+    //      }
+    //      val dist = coOccurrences(index)(v1(i), v2(i))
+    //      sum += dist * dist
+    //    }
 
     while(ind < indices.length) {
       // the indexed values are (begin, end]
@@ -432,18 +471,15 @@ class KMeansForMixedData private (
     }
     sum
   }
-}
 
-object KMeansForMixedData {
-
-  private[spark] def validateInitMode(initMode: String): Boolean = {
-    initMode match {
-      case KMeans.RANDOM => true
-      case KMeans.K_MEANS_PARALLEL => true
-      case _ => false
-    }
-  }
-
+  /**
+   * Returns the cost of a given point against the given cluster centers.
+   */
+  private[mllib] def pointCost(centers: TraversableOnce[VectorWithVector],
+                                point: VectorWithVector)
+                              (implicit coOccurrences: Array[SparseMatrix],
+                               indices: Array[Int]): Double =
+    findClosest(centers, point)._2
 }
 
 /**
@@ -478,9 +514,13 @@ class VectorWithVector(
 object VectorWithVector {
   def create(qualiVector: Vector,
              quantiVector: Vector, significance: Array[Double]): VectorWithVector = {
-    require(quantiVector.size == significance.length, "Not every quantitative feature" +
-      "has a significance")
-    val values = quantiVector.toArray.zip(significance).map{ case (x, a) => a * x }
+    require(quantiVector.size == significance.length, "Not every quantitative feature " +
+      s"has a significance. vec: ${qualiVector.size}, ${quantiVector.size}, " +
+      s"sig: ${significance.length}")
+    val values = quantiVector.toArray.zip(significance).map{ case (x, a) => (a * x).toDouble }
+    // scalastyle:off
+//    println(values.mkString(","))
+//    println(quantiVector.toArray.mkString(","))
     new VectorWithVector(qualiVector, Vectors.dense(values).compressed)
   }
 }

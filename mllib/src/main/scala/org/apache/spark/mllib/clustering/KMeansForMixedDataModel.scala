@@ -18,9 +18,7 @@
 package org.apache.spark.mllib.clustering
 
 import scala.collection.JavaConverters._
-import org.json4s._
-import org.json4s.JsonDSL._
-import org.json4s.jackson.JsonMethods._
+
 import org.apache.spark.SparkContext
 import org.apache.spark.annotation.Since
 import org.apache.spark.api.java.JavaRDD
@@ -43,13 +41,9 @@ class KMeansForMixedDataModel @Since("1.1.0")
 
   private val clusterCentersWithVector =
     if (clusterCenters == null) null else clusterCenters.map(new VectorWithVector(_))
-  
-  def this(coOccurrences: Array[SparseMatrix],
-    significances: Array[Double],
-    indices: Array[Int],
-    centers: java.lang.Iterable[VectorWithVector]) = {
-    this(coOccurrences, significances, indices, centers.asScala.toArray)
-  }
+  private implicit val coo = coOccurrences
+  private implicit val sig = significances
+  private implicit val ind = indices
 
   /**
    * Total number of clusters.
@@ -57,22 +51,21 @@ class KMeansForMixedDataModel @Since("1.1.0")
   @Since("0.8.0")
   def k: Int = clusterCentersWithVector.length
 
-//  /**
-//   * Returns the cluster index that a given point belongs to.
-//   */
-//  @Since("0.8.0")
-//  def predict(point: Vector): Int = {
-//    KMeans.findClosest(clusterCentersWithVector, new VectorWithNorm(point))._1
-//  }
+  /**
+   * Returns the cluster index that a given point belongs to.
+   */
+  def predict(point: VectorWithVector): Int = {
+    KMeansForMixedData.findClosest(clusterCentersWithVector, point)._1
+  }
 
-//  /**
-//   * Maps given points to their cluster indices.
-//   */
-//  @Since("1.0.0")
-//  def predict(points: RDD[Vector]): RDD[Int] = {
-//    val bcCentersWithNorm = points.context.broadcast(clusterCentersWithVector)
-//    points.map(p => KMeans.findClosest(bcCentersWithNorm.value, new VectorWithNorm(p))._1)
-//  }
+  /**
+   * Maps given points to their cluster indices.
+   */
+  @Since("1.0.0")
+  def predict(points: RDD[VectorWithVector]): RDD[Int] = {
+    val bcCenters = points.context.broadcast(clusterCentersWithVector)
+    points.map(p => KMeansForMixedData.findClosest(bcCenters.value, p)._1)
+  }
 
   /**
    * Maps given points to their cluster indices.
@@ -81,18 +74,17 @@ class KMeansForMixedDataModel @Since("1.1.0")
   def predict(points: JavaRDD[Vector]): JavaRDD[java.lang.Integer] =
     predict(points.rdd).toJavaRDD().asInstanceOf[JavaRDD[java.lang.Integer]]
 
-//  /**
-//   * Return the K-means cost (sum of squared distances of points to their nearest center) for this
-//   * model on the given data.
-//   */
-//  @Since("0.8.0")
-//  def computeCost(data: RDD[Vector]): Double = {
-//    val bcCentersWithNorm = data.context.broadcast(clusterCentersWithVector)
-//    val cost = data
-//      .map(p => KMeans.pointCost(bcCentersWithNorm.value, new VectorWithNorm(p))).sum()
-//    bcCentersWithNorm.destroy(blocking = false)
-//    cost
-//  }
+  /**
+   * Return the K-means cost (sum of squared distances of points to their nearest center) for this
+   * model on the given data.
+   */
+  def computeCost(data: RDD[VectorWithVector]): Double = {
+    val bcCenters = data.context.broadcast(clusterCentersWithVector)
+    val cost = data
+      .map(p => KMeansForMixedData.pointCost(bcCenters.value, p)).sum()
+    bcCenters.destroy(blocking = false)
+    cost
+  }
 
 
   @Since("1.4.0")

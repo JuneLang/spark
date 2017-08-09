@@ -904,11 +904,13 @@ class SparseVector @Since("1.0.0") (
     }
   }
 
-  override def slice(from: Int, until: Int): SparseVector = {
+  override def slice(from: Int, until: Int): Vector = {
 //    slice(from.until(until).toArray)
-    val selectedIndices = this.indices.takeWhile(i => i >= from && i < until)
-    val selectedValues = selectedIndices.map(i => this.values(i))
-    new SparseVector(selectedIndices.length, selectedIndices, selectedValues)
+    val selectedIndices = this.indices.zipWithIndex.filter{case (i, ind) =>
+      i >= from && i < until}
+    val selectedValues = selectedIndices.map{case (i, ind) => this.values(ind)}
+
+    new SparseVector(until - from, selectedIndices.map(i => i._1 - from), selectedValues)
   }
 
   /**
