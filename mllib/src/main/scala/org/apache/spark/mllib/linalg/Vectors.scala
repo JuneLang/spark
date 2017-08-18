@@ -910,7 +910,8 @@ class SparseVector @Since("1.0.0") (
       i >= from && i < until}
     val selectedValues = selectedIndices.map{case (i, ind) => this.values(ind)}
 
-    new SparseVector(until - from, selectedIndices.map(i => i._1 - from), selectedValues)
+    new SparseVector(until - from, selectedIndices.map(i =>
+      i._1 - from), selectedValues).compressed
   }
 
   /**

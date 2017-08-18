@@ -68,6 +68,19 @@ class KMeansForMixedDataModel @Since("1.1.0")
   }
 
   /**
+   * Returns the cluster index that a given point belongs to.
+   */
+  def predict(point: Vector): Int = {
+    val p = VectorWithVector.create(point, significances, indices.last + 1)
+    predict(p)
+  }
+// scala cant recognize the data type in rdd.
+//  def predict(points: RDD[Vector]): RDD[Int] = {
+//    val ps = points.map(vec => VectorWithVector.create(vec, significances, indices.last + 1))
+//    predict(ps)
+//  }
+
+  /**
    * Maps given points to their cluster indices.
    */
   @Since("1.0.0")

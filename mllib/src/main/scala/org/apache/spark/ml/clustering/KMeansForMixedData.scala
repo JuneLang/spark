@@ -19,14 +19,13 @@ package org.apache.spark.ml.clustering
 
 import scala.collection.mutable
 
-import org.apache.spark.SparkException
 import org.apache.spark.annotation.{Experimental, Since}
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.ml.linalg.{SparseMatrix, Vector, VectorUDT}
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.param.shared._
 import org.apache.spark.ml.util._
-import org.apache.spark.mllib.clustering.{KMeansForMixedData => MLlibKMeans, KMeansForMixedDataModel => MLlibKMeansModel}
+import org.apache.spark.mllib.clustering.{KMeansForMixedData => MLlibKMeans, KMeansForMixedDataModel => MLlibKMeansModel, VectorWithVector}
 import org.apache.spark.mllib.clustering.MatrixImplicits._
 import org.apache.spark.mllib.linalg.{Matrices, SparseMatrix => oldSparseMatrix, Vector => OldVector, Vectors => OldVectors}
 import org.apache.spark.mllib.linalg.VectorImplicits._
@@ -127,18 +126,24 @@ private[clustering] trait KMeansForMixedDataParams
   }
 }
 
-class KMeansForMixedDataModel extends Model[KMeansForMixedDataModel]
+class KMeansForMixedDataModel(
+                             override val uid: String,
+                             private val parentModel: MLlibKMeansModel
+                             ) extends Model[KMeansForMixedDataModel]
   with KMeansForMixedDataParams {
   /**
    * An immutable unique ID for the object and its derivatives.
    */
-  override val uid: String = Identifiable.randomUID("kMeansForMixedDataModel")
   override def copy(extra: ParamMap): KMeansForMixedDataModel = defaultCopy(extra)
 
   /**
    * Transforms the input dataset.
    */
-  override def transform(dataset: Dataset[_]): DataFrame = dataset.toDF()
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    transformSchema(dataset.schema, logging = true)
+    val predictUDF = udf {(vector: Vector) => predict(vector)}
+    dataset.withColumn($(predictionCol), predictUDF(col($(featuresCol))))
+  }
 
   /**
    * :: DeveloperApi ::
@@ -154,7 +159,18 @@ class KMeansForMixedDataModel extends Model[KMeansForMixedDataModel]
    */
   override def transformSchema(schema: StructType): StructType = schema
 
+  def predict(features: Vector): Int = parentModel.predict(features)
 
+  def clusterCenters: Array[Vector] = parentModel.clusterCenters.map(_.vector.asML)
+
+  def computeCost(dataset: Dataset[_]): Double = {
+    SchemaUtils.checkColumnType(dataset.schema, $(featuresCol), new VectorUDT)
+    val data = dataset.select(col($(featuresCol))).rdd.map {
+      case Row(point: Vector) => VectorWithVector.create(point, parentModel.significances,
+                                                          parentModel.indices.last + 1)
+    }
+    parentModel.computeCost(data)
+  }
 }
 
 /**
@@ -202,13 +218,20 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
 
     val featureIndexes = getFeatureIndexes(dataset, $(inputQualitativeCols))
     //
-    var acc = 0
+    var acc = -1
     val indices = for (ele <- featureIndexes ) yield { acc = acc + ele.length; acc }
 
     val algo = new MLlibKMeans(coOccurrences, significances, indices)
+    val parentModel = algo.run(instances)
+    val model = copyValues(new KMeansForMixedDataModel(uid, parentModel)).setParent(this)
 
+    // TODO: summary
 
-    new KMeansForMixedDataModel()
+    instr.logSuccess(model)
+    if (handlePersistence) {
+      instances.unpersist()
+    }
+    model
   }
 
   /**
@@ -230,7 +253,9 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
    * Typical implementation should first conduct verification on schema change and parameter
    * validity, including complex parameter interaction checks.
    */
-  override def transformSchema(schema: StructType): StructType = schema
+  override def transformSchema(schema: StructType): StructType = {
+    validateAndTransformSchema(schema)
+  }
 
   /**
    * For convenience, compute the co-occurrence and significances here.
