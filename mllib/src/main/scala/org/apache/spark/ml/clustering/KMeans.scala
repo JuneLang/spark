@@ -87,7 +87,7 @@ private[clustering] trait KMeansParams extends Params with HasMaxIter with HasFe
   /**
    * Validates and transforms the input schema.
    * @param schema input schema
-   * @return output schema
+   * @return output schemaf
    */
   protected def validateAndTransformSchema(schema: StructType): StructType = {
     SchemaUtils.checkColumnType(schema, $(featuresCol), new VectorUDT)

@@ -196,6 +196,9 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
   @Since("1.5.0")
   def setFeaturesCol(value: String): this.type = set(featuresCol, value)
 
+  def setOccurrences(value: Map[String, Array[(Double, Long)]])
+    : this.type = set(occurrences, value)
+
   /**
    * TODO: return type to be KMeansModel. And make it similar to KMeans fit().
    * @param dataset
@@ -220,7 +223,8 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
     //
     var acc = -1
     val indices = for (ele <- featureIndexes ) yield { acc = acc + ele.length; acc }
-
+    // scalastyle:off
+    println(featureIndexes.mkString(","))
     val algo = new MLlibKMeans(coOccurrences, significances, indices)
     val parentModel = algo.run(instances)
     val model = copyValues(new KMeansForMixedDataModel(uid, parentModel)).setParent(this)
@@ -284,7 +288,8 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
     for (i <- columns.indices) {
       val coli = columns(i)
       val values = if (qualiLength > i) {
-        occurrenceOf(qualiColumns(i))
+
+        $(occurrences)(qualiColumns(i))
       } else {
         dataset.select(coli).rdd.map(row =>
           (row.getDouble(0), 1)).
@@ -321,12 +326,6 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
           cp += (row._1 -> (cp(row._1) :+ row._2)))
         val conditionalProbas = cp.mapValues(v => v.sortBy(_._1))
 
-        // scalastyle:off
-        //      conditionalProbas.toArray foreach(x => {
-        //        print("value:" + x._1 + ": ")
-        //        x._2 foreach print
-        //      })
-        //      println()
         // now, we cal calculate the d_ij(x,y) for every x and y in column i
         for (x <- 0 until values.length) {
           val vx = values(x)
@@ -340,14 +339,27 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
               val d_jx = conditionalProbas(vx._1)
               val d_jy = conditionalProbas(vy._1)
 
-              if (d_jx.length != d_jy.length) {
-                throw new Exception("The length of array `conditionalProbas` should be same")
-              }
+              // it is possible that d_jx and d_jy contain different index
+              val length = Math.max(d_jx.last._1, d_jy.last._1).toInt
+
+              val d_jxFull = Array.fill[Double](length + 1)(0)
+              d_jx.foreach(ele => d_jxFull(ele._1.toInt) = ele._2)
+              val d_jyFull = Array.fill[Double](length + 1)(0)
+              d_jy.foreach(ele => d_jyFull(ele._1.toInt) = ele._2)
+
               var d_jxy = 0.0
-              for (k <- d_jx.indices) {
-                val d_jxk = d_jx(k)
-                d_jxy += Math.max(d_jx(k)._2, d_jy(k)._2)
+              for (k <- d_jxFull.indices) {
+                d_jxy += Math.max(d_jxFull(k), d_jyFull(k))
               }
+              // scalastyle:off
+              if (coli == "data-cartefidelite-str-index") {
+                println(d_jxFull.mkString(","))
+                println(d_jyFull.mkString(","))
+                println(d_jxy)
+                println("---------")
+              }
+
+
               coo_i(matrixIndex) = (vx._1.toInt, vy._1.toInt, (d_jxy - 1) / (m - 1))
             }
             matrixIndex += 1

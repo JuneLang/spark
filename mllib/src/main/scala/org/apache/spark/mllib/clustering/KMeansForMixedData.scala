@@ -401,6 +401,15 @@ object KMeansForMixedData {
     sqQualiDist + sqQuantiDist
   }
 
+  /**
+   * The squared distance between 2 vectors.
+   * This function is suitable for multi-value features.
+   * @param v1
+   * @param v2
+   * @param coOccurrences
+   * @param indices
+   * @return
+   */
   def sqQualiDistance(v1: Vector, v2: Vector)
                      (implicit coOccurrences: Array[SparseMatrix],
                       indices: Array[Int]): Double = {
@@ -508,7 +517,7 @@ object VectorWithVector {
   def create(qualiVector: Vector,
              quantiVector: Vector, significance: Array[Double]): VectorWithVector = {
     require(quantiVector.size == significance.length, "Not every quantitative feature " +
-      s"has a significance. vec: ${quantiVector.size}, " +
+      s"has a significance. vec:${qualiVector.size} ${quantiVector.size}, " +
       s"sig: ${significance.length}")
     val values = quantiVector.toArray.zip(significance).map{ case (x, a) => (a * x).toDouble }
     val quantiVectorWithSig = Vectors.dense(values)
