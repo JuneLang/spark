@@ -19,8 +19,10 @@ package org.apache.spark.ml.clustering
 
 import scala.collection.mutable
 
+import org.apache.hadoop.fs.Path
+
 import org.apache.spark.annotation.{Experimental, Since}
-import org.apache.spark.ml.{Estimator, Model}
+import org.apache.spark.ml.{clustering, Estimator, Model}
 import org.apache.spark.ml.linalg.{SparseMatrix, Vector, VectorUDT}
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.param.shared._
@@ -34,7 +36,6 @@ import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.sql.functions.{col, udf}
 import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.util.VersionUtils.majorVersion
 
 
 
@@ -130,7 +131,7 @@ class KMeansForMixedDataModel(
                              override val uid: String,
                              private val parentModel: MLlibKMeansModel
                              ) extends Model[KMeansForMixedDataModel]
-  with KMeansForMixedDataParams {
+  with KMeansForMixedDataParams with MLWritable {
   /**
    * An immutable unique ID for the object and its derivatives.
    */
@@ -171,6 +172,32 @@ class KMeansForMixedDataModel(
     }
     parentModel.computeCost(data)
   }
+
+  override def write: MLWriter =
+    new clustering.KMeansForMixedDataModel.KMeansForMixedDataModelWriter(this)
+}
+
+object KMeansForMixedDataModel{
+
+  /** Helper class for storing model data */
+  private case class Data(clusterIdx: Int, clusterCenter: Vector)
+
+  /** [[MLWriter]] instance for [[KMeansForMixedDataModel]] */
+  private[KMeansForMixedDataModel]
+  class KMeansForMixedDataModelWriter(instance: KMeansForMixedDataModel)
+    extends MLWriter {
+
+    override protected def saveImpl(path: String): Unit = {
+      // Save metadata and Params
+      DefaultParamsWriter.saveMetadata(instance, path, sc)
+      // Save model data: cluster centers
+      val data: Array[Data] = instance.clusterCenters.zipWithIndex.map { case (center, idx) =>
+        Data(idx, center)
+      }
+      val dataPath = new Path(path, "data").toString
+      sparkSession.createDataFrame(data).repartition(1).write.parquet(dataPath)
+    }
+  }
 }
 
 /**
@@ -199,6 +226,8 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
   def setOccurrences(value: Map[String, Array[(Double, Long)]])
     : this.type = set(occurrences, value)
 
+  def setK(value: Int): this.type = set(k, value)
+
   /**
    * TODO: return type to be KMeansModel. And make it similar to KMeans fit().
    * @param dataset
@@ -223,9 +252,9 @@ class KMeansForMixedData(override val uid: String) extends Estimator[KMeansForMi
     //
     var acc = -1
     val indices = for (ele <- featureIndexes ) yield { acc = acc + ele.length; acc }
-    // scalastyle:off
-    println(featureIndexes.mkString(","))
+
     val algo = new MLlibKMeans(coOccurrences, significances, indices)
+      .setK($(k))
     val parentModel = algo.run(instances)
     val model = copyValues(new KMeansForMixedDataModel(uid, parentModel)).setParent(this)
 

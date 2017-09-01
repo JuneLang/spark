@@ -19,6 +19,10 @@ package org.apache.spark.mllib.clustering
 
 import scala.collection.JavaConverters._
 
+import org.json4s._
+import org.json4s.JsonDSL._
+import org.json4s.jackson.JsonMethods._
+
 import org.apache.spark.SparkContext
 import org.apache.spark.annotation.Since
 import org.apache.spark.api.java.JavaRDD
@@ -102,48 +106,48 @@ class KMeansForMixedDataModel @Since("1.1.0")
 
   @Since("1.4.0")
   override def save(sc: SparkContext, path: String): Unit = {
-//    KMeansModel.SaveLoadV1_0.save(sc, this, path)
+    KMeansForMixedDataModel.SaveLoadV1_0.save(sc, this, path)
   }
 
   override protected def formatVersion: String = "1.0"
 }
 
-// scalastyle:off
-//@Since("1.4.0")
-//object KMeansForMixedDataModel extends Loader[KMeansModel] {
-//
-//  @Since("1.4.0")
-//  override def load(sc: SparkContext, path: String): KMeansModel = {
-//    KMeansModel.SaveLoadV1_0.load(sc, path)
-//  }
-//
-//  private case class Cluster(id: Int, point: Vector)
-//
-//  private object Cluster {
-//    def apply(r: Row): Cluster = {
-//      Cluster(r.getInt(0), r.getAs[Vector](1))
-//    }
-//  }
-//
-//  private[clustering]
-//  object SaveLoadV1_0 {
-//
-//    private val thisFormatVersion = "1.0"
-//
-//    private[clustering]
-//    val thisClassName = "org.apache.spark.mllib.clustering.KMeansModel"
-//
-//    def save(sc: SparkContext, model: KMeansModel, path: String): Unit = {
-//      val spark = SparkSession.builder().sparkContext(sc).getOrCreate()
-//      val metadata = compact(render(
-//        ("class" -> thisClassName) ~ ("version" -> thisFormatVersion) ~ ("k" -> model.k)))
-//      sc.parallelize(Seq(metadata), 1).saveAsTextFile(Loader.metadataPath(path))
-//      val dataRDD = sc.parallelize(model.clusterCentersWithNorm.zipWithIndex).map { case (p, id) =>
-//        Cluster(id, p.vector)
-//      }
-//      spark.createDataFrame(dataRDD).write.parquet(Loader.dataPath(path))
-//    }
-//
+//scalastyle:off
+@Since("1.4.0")
+object KMeansForMixedDataModel extends Loader[KMeansModel] {
+
+  @Since("1.4.0")
+  override def load(sc: SparkContext, path: String): KMeansModel = {
+    KMeansModel.SaveLoadV1_0.load(sc, path)
+  }
+
+  private case class Cluster(id: Int, point: Vector)
+
+  private object Cluster {
+    def apply(r: Row): Cluster = {
+      Cluster(r.getInt(0), r.getAs[Vector](1))
+    }
+  }
+
+  private[clustering]
+  object SaveLoadV1_0 {
+
+    private val thisFormatVersion = "1.0"
+
+    private[clustering]
+    val thisClassName = "org.apache.spark.mllib.clustering.KMeansForMixedDataModel"
+
+    def save(sc: SparkContext, model: KMeansForMixedDataModel, path: String): Unit = {
+      val spark = SparkSession.builder().sparkContext(sc).getOrCreate()
+      val metadata = compact(render(
+        ("class" -> thisClassName) ~ ("version" -> thisFormatVersion) ~ ("k" -> model.k)))
+      sc.parallelize(Seq(metadata), 1).saveAsTextFile(Loader.metadataPath(path))
+      val dataRDD = sc.parallelize(model.clusterCentersWithVector.zipWithIndex).map { case (p, id) =>
+        Cluster(id, p.vector)
+      }
+      spark.createDataFrame(dataRDD).write.parquet(Loader.dataPath(path))
+    }
+
 //    def load(sc: SparkContext, path: String): KMeansModel = {
 //      implicit val formats = DefaultFormats
 //      val spark = SparkSession.builder().sparkContext(sc).getOrCreate()
@@ -155,7 +159,7 @@ class KMeansForMixedDataModel @Since("1.1.0")
 //      Loader.checkSchema[Cluster](centroids.schema)
 //      val localCentroids = centroids.rdd.map(Cluster.apply).collect()
 //      assert(k == localCentroids.length)
-//      new KMeansModel(localCentroids.sortBy(_.id).map(_.point))
+//      new KMeansForMixedDataModel(localCentroids.sortBy(_.id).map(_.point))
 //    }
-//  }
-//}
+  }
+}
